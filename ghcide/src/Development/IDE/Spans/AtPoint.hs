@@ -54,7 +54,7 @@ import           HieDb                                hiding (pointCommand)
 import           System.Directory                     (doesFileExist)
 
 #if MIN_VERSION_ghc(9,0,1)
-import qualified Outputable                           as O
+import qualified Development.IDE.GHC.Compat.Outputable as O
 import Data.Tree
 import qualified Data.Tree as T
 import           Data.List                            (isSuffixOf, sortOn)
@@ -288,17 +288,17 @@ atPoint IdeOptions{} (HAR _ (hf :: HieASTs a) _rf _ kind) (DKMap dm km) env pos 
         renderEvidenceTree (T.Node (EvidenceInfo{evidenceDetails=Just (EvLetBind _,_,_)}) [x])
           = renderEvidenceTree x
         renderEvidenceTree (T.Node (EvidenceInfo{evidenceDetails=Just (EvLetBind _,_,_), ..}) xs)
-          = hang (text "Evidence of constraint `" O.<> expandType evidenceType O.<> "`") 2 $
+          = hang (text "Evidence of constraint `" `O.append` expandType evidenceType `O.append` "`") 2 $
                  vcat $ text "constructed using:" : map renderEvidenceTree' xs
         renderEvidenceTree (T.Node (EvidenceInfo{..}) _)
-          = hang (text "Evidence of constraint `" O.<> expandType evidenceType O.<> "`") 2 $
+          = hang (text "Evidence of constraint `" `O.append` expandType evidenceType `O.append` "`") 2 $
                  vcat $ printDets evidenceSpan evidenceDetails : map (text . T.unpack) (definedAt evidenceVar)
 
         -- renderEvidenceTree' skips let bound evidence variables and prints the children directly
         renderEvidenceTree' (T.Node (EvidenceInfo{evidenceDetails=Just (EvLetBind _,_,_)}) xs)
           = vcat (map renderEvidenceTree' xs)
         renderEvidenceTree' (T.Node (EvidenceInfo{..}) _)
-          = hang (text "- `" O.<> expandType evidenceType O.<> "`") 2 $
+          = hang (text "- `" `O.append` expandType evidenceType `O.append` "`") 2 $
                  vcat $ printDets evidenceSpan evidenceDetails : map (text . T.unpack) (definedAt evidenceVar)
 
         printDets :: RealSrcSpan -> Maybe (EvVarSource, Scope, Maybe Span) -> SDoc
