@@ -16,6 +16,9 @@ module Development.IDE.Spans.AtPoint (
   , computeTypeReferences
   , FOIReferences(..)
   , defRowToSymbolInfo
+  , getAstNamesAtPoint
+  , toCurrentLocation
+  , rowToLoc
   ) where
 
 import           Development.IDE.GHC.Error
@@ -27,26 +30,16 @@ import           Language.LSP.Types
 import           Development.IDE.Core.PositionMapping
 import           Development.IDE.Core.RuleTypes
 import           Development.IDE.GHC.Compat
+import qualified Development.IDE.GHC.Compat.Util      as Util
 import           Development.IDE.Spans.Common
 import           Development.IDE.Types.Options
-
--- GHC API imports
--- GHC API imports
-import           FastString                           (unpackFS, lengthFS)
-import           IfaceType
-import           Name
-import           NameEnv
-import           Outputable                           hiding ((<>))
-import           SrcLoc
-import           TyCoRep                              hiding (FunTy)
-import           TyCon
-import qualified Var
 
 import           Control.Applicative
 import           Control.Monad.Extra
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Class
 import           Control.Monad.Trans.Maybe
+import           Data.Coerce                          (coerce)
 import qualified Data.HashMap.Strict                  as HM
 import qualified Data.Map.Strict                      as M
 import           Data.Maybe
@@ -56,6 +49,7 @@ import qualified Data.Array                           as A
 import           Data.Either
 import           Data.List.Extra                      (dropEnd1, nubOrd)
 
+import           Data.Version                         (showVersion)
 import           HieDb                                hiding (pointCommand)
 import           System.Directory                     (doesFileExist)
 
@@ -98,8 +92,7 @@ foiReferencesAtPoint file pos (FOIReferences asts) =
   case HM.lookup file asts of
     Nothing -> ([],[],[])
     Just (HAR _ hf _ _ _,mapping) ->
-      let posFile = fromMaybe pos $ fromCurrentPosition mapping pos
-          names = concat $ pointCommand hf posFile (rights . M.keys . getNodeIds)
+      let names = getAstNamesAtPoint hf pos mapping
           adjustedLocs = HM.foldr go [] asts
           go (HAR _ _ rf tr _, mapping) xs = refs ++ typerefs ++ xs
             where
@@ -107,8 +100,17 @@ foiReferencesAtPoint file pos (FOIReferences asts) =
                    $ concat $ mapMaybe (\n -> M.lookup (Right n) rf) names
               typerefs = mapMaybe (toCurrentLocation mapping . realSrcSpanToLocation)
                    $ concat $ mapMaybe (`M.lookup` tr) names
-          toCurrentLocation mapping (Location uri range) = Location uri <$> toCurrentRange mapping range
         in (names, adjustedLocs,map fromNormalizedFilePath $ HM.keys asts)
+
+getAstNamesAtPoint :: HieASTs a -> Position -> PositionMapping -> [Name]
+getAstNamesAtPoint hf pos mapping =
+  concat $ pointCommand hf posFile (rights . M.keys . getNodeIds)
+    where
+      posFile = fromMaybe pos $ fromCurrentPosition mapping pos
+
+toCurrentLocation :: PositionMapping -> Location -> Maybe Location
+toCurrentLocation mapping (Location uri range) =
+  Location uri <$> toCurrentRange mapping range
 
 referencesAtPoint
   :: MonadIO m
@@ -127,12 +129,12 @@ referencesAtPoint hiedb nfp pos refs = do
       Just mod -> do
          -- Look for references (strictly in project files, not dependencies),
          -- excluding the files in the FOIs (since those are in foiRefs)
-         rows <- liftIO $ findReferences hiedb True (nameOccName name) (Just $ moduleName mod) (Just $ moduleUnitId mod) exclude
+         rows <- liftIO $ findReferences hiedb True (nameOccName name) (Just $ moduleName mod) (Just $ moduleUnit mod) exclude
          pure $ mapMaybe rowToLoc rows
   typeRefs <- forM names $ \name ->
     case nameModule_maybe name of
       Just mod | isTcClsNameSpace (occNameSpace $ nameOccName name) -> do
-        refs <- liftIO $ findTypeRefs hiedb True (nameOccName name) (Just $ moduleName mod) (Just $ moduleUnitId mod) exclude
+        refs <- liftIO $ findTypeRefs hiedb True (nameOccName name) (Just $ moduleName mod) (Just $ moduleUnit mod) exclude
         pure $ mapMaybe typeRowToLoc refs
       _ -> pure []
   pure $ nubOrd $ foiRefs ++ concat nonFOIRefs ++ concat typeRefs
@@ -215,15 +217,16 @@ atPoint
   :: IdeOptions
   -> HieAstResult
   -> DocAndKindMap
+  -> HscEnv
   -> Position
   -> Maybe (Maybe Range, [T.Text])
-atPoint IdeOptions{} (HAR _ (hf :: HieASTs a) _rf _ kind) (DKMap dm km) pos = listToMaybe $ pointCommand hf pos hoverInfo
+atPoint IdeOptions{} (HAR _ (hf :: HieASTs a) _rf _ kind) (DKMap dm km) env pos = listToMaybe $ pointCommand hf pos hoverInfo
   where
     -- Hover info for values/data
     hoverInfo ast = (Just range, prettyNames ++ pTypes)
       where
         pTypes
-          | length names == 1 = dropEnd1 $ map wrapHaskell prettyTypes
+          | Prelude.length names == 1 = dropEnd1 $ map wrapHaskell prettyTypes
           | otherwise = map wrapHaskell prettyTypes
 
         range = realSrcSpanToRange $ nodeSpan ast
@@ -247,10 +250,19 @@ atPoint IdeOptions{} (HAR _ (hf :: HieASTs a) _rf _ kind) (DKMap dm km) pos = li
           = T.unlines $
           wrapHaskell (showNameWithoutUniques n <> maybe "" (" :: " <>) ((prettyType <$> identType dets) <|> maybeKind))
           : definedAt n
+          ++ maybeToList (prettyPackageName n)
           ++ catMaybes [ T.unlines . spanDocToMarkdown <$> lookupNameEnv dm n
                        ]
           where maybeKind = fmap showGhc $ safeTyThingType =<< lookupNameEnv km n
         prettyName (Left m,_) = showGhc m
+
+        prettyPackageName n = do
+          m <- nameModule_maybe n
+          let pid = moduleUnit m
+          conf <- lookupUnit env pid
+          let pkgName = T.pack $ unitPackageNameString conf
+              version = T.pack $ showVersion (unitPackageVersion conf)
+          pure $ " *(" <> pkgName <> "-" <> version <> ")*"
 
         prettyTypes = map (("_ :: "<>) . prettyType) types
         prettyType = showSD . expandType
@@ -345,10 +357,10 @@ typeLocationsAtPoint hiedb lookupModule _ideOptions pos (HAR _ ast _ _ hieKind) 
         in nubOrd <$> concatMapM (fmap (fromMaybe []) . nameToLocation hiedb lookupModule) (getTypes ts)
 
 namesInType :: Type -> [Name]
-namesInType (TyVarTy n)      = [Var.varName n]
+namesInType (TyVarTy n)      = [varName n]
 namesInType (AppTy a b)      = getTypes [a,b]
 namesInType (TyConApp tc ts) = tyConName tc : getTypes ts
-namesInType (ForAllTy b t)   = Var.varName (binderVar b) : namesInType t
+namesInType (ForAllTy b t)   = varName (binderVar b) : namesInType t
 namesInType (FunTy a b)      = getTypes [a,b]
 namesInType (CastTy t _)     = namesInType t
 namesInType (LitTy _)        = []
@@ -384,9 +396,9 @@ locationsAtPoint hiedb lookupModule _ideOptions imports pos (HAR _ ast _rm _ _) 
 nameToLocation :: MonadIO m => HieDb -> LookupModule m -> Name -> m (Maybe [Location])
 nameToLocation hiedb lookupModule name = runMaybeT $
   case nameSrcSpan name of
-    sp@(OldRealSrcSpan rsp)
+    sp@(RealSrcSpan rsp _)
       -- Lookup in the db if we got a location in a boot file
-      | fs <- unpackFS (srcSpanFile rsp)
+      | fs <- Util.unpackFS (srcSpanFile rsp)
       , not $ "boot" `isSuffixOf` fs
       -> do
           itExists <- liftIO $ doesFileExist fs
@@ -404,7 +416,7 @@ nameToLocation hiedb lookupModule name = runMaybeT $
       -- In this case the interface files contain garbage source spans
       -- so we instead read the .hie files to get useful source spans.
       mod <- MaybeT $ return $ nameModule_maybe name
-      erow <- liftIO $ findDef hiedb (nameOccName name) (Just $ moduleName mod) (Just $ moduleUnitId mod)
+      erow <- liftIO $ findDef hiedb (nameOccName name) (Just $ moduleName mod) (Just $ moduleUnit mod)
       case erow of
         [] -> do
           -- If the lookup failed, try again without specifying a unit-id.
@@ -449,7 +461,17 @@ defRowToSymbolInfo _ = Nothing
 pointCommand :: HieASTs t -> Position -> (HieAST t -> a) -> [a]
 pointCommand hf pos k =
     catMaybes $ M.elems $ flip M.mapWithKey (getAsts hf) $ \fs ast ->
-      case selectSmallestContaining (sp fs) ast of
+      -- Since GHC 9.2:
+      -- getAsts :: Map HiePath (HieAst a)
+      -- type HiePath = LexialFastString
+      --
+      -- but before:
+      -- getAsts :: Map HiePath (HieAst a)
+      -- type HiePath = FastString
+      --
+      -- 'coerce' here to avoid an additional function for maintaining
+      -- backwards compatibility.
+      case selectSmallestContaining (sp $ coerce fs) ast of
         Nothing   -> Nothing
         Just ast' -> Just $ k ast'
  where
