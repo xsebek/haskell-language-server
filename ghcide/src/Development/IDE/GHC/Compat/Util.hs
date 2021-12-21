@@ -43,6 +43,7 @@ module Development.IDE.GHC.Compat.Util (
 #endif
     uniq,
     unpackFS,
+    lengthFS,
     mkFastString,
     fsLit,
     pprHsString,
