@@ -2,6 +2,7 @@
 
 module Development.IDE.GHC.Compat.Outputable (
     SDoc,
+    append,
     Outputable,
     showSDoc,
     showSDocUnsafe,
@@ -43,6 +44,7 @@ import           GHC.Unit.State
 import           GHC.Utils.Error                 hiding (mkWarnMsg)
 import           GHC.Utils.Logger
 import           GHC.Utils.Outputable
+import qualified GHC.Utils.Outputable            as Out
 import           GHC.Utils.Panic
 #elif MIN_VERSION_ghc(9,0,0)
 import           GHC.Driver.Session
@@ -163,3 +165,8 @@ mkWarnMsg =
 #else
   Err.mkWarnMsg
 #endif
+
+--  2021-12-21: NOTE: A lazy way to make export of Outputable.(<>) to not clash with Semigroup
+--  under unqualified Compat.Outputable imports.
+append :: SDoc -> SDoc -> SDoc
+append = (Out.<>)
