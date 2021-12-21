@@ -186,7 +186,7 @@ documentHighlight hf rf pos = pure highlights
         else HkRead
 
     isBadSpan :: Name -> RealSrcSpan -> Bool
-    isBadSpan n sp = srcSpanStartLine sp /= srcSpanEndLine sp || (srcSpanEndCol sp - srcSpanStartCol sp > lengthFS (occNameFS $ nameOccName n))
+    isBadSpan n sp = srcSpanStartLine sp /= srcSpanEndLine sp || (srcSpanEndCol sp - srcSpanStartCol sp > Util.lengthFS (occNameFS $ nameOccName n))
 
 gotoTypeDefinition
   :: MonadIO m
