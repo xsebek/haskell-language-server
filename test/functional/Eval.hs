@@ -21,6 +21,9 @@ import           Test.Tasty
 import           Test.Tasty.ExpectedFailure      (expectFailBecause)
 import           Test.Tasty.HUnit
 
+-- >>> putStrLn "Hello World" >> pure 1
+-- 1
+
 tests :: TestTree
 tests = testGroup
   "eval"
